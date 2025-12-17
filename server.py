@@ -6,7 +6,6 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 from fastmcp import FastMCP, Context
 from dotenv import load_dotenv
-from jsonpath_ng import parse
 
 load_dotenv()
 
@@ -198,45 +197,118 @@ class SuperFakturaClient:
         return self._request("DELETE", endpoint)
 
 
-def _apply_jsonpath_filter(data: Dict[str, Any], fields_filter: Optional[str]) -> Dict[str, Any]:
+def _get_nested_value(data: Any, path: str) -> Any:
     """
-    Apply JSONPath filter to API response.
+    Get value from nested dictionary using dot notation.
+
+    Args:
+        data: Data to extract from (dict, list, or primitive)
+        path: Dot-separated path (e.g., "Invoice.id" or "items.0.Client.name")
+
+    Returns:
+        Extracted value or None if path doesn't exist
+    """
+    if not path:
+        return data
+
+    parts = path.split(".", 1)
+    key = parts[0]
+    remaining = parts[1] if len(parts) > 1 else ""
+
+    # Handle list indexing (e.g., "items" when data is a list)
+    if isinstance(data, list):
+        # If key is a number, treat as index
+        if key.isdigit():
+            idx = int(key)
+            if 0 <= idx < len(data):
+                return _get_nested_value(data[idx], remaining)
+            return None
+        # Otherwise, apply to all items in the list
+        results = []
+        for item in data:
+            val = _get_nested_value(item, path)
+            if val is not None:
+                results.append(val)
+        return results if results else None
+
+    # Handle dictionary access
+    if isinstance(data, dict):
+        if key not in data:
+            return None
+        return _get_nested_value(data[key], remaining)
+
+    # Can't traverse further
+    return None
+
+
+def _apply_fields_filter(data: Dict[str, Any], fields_filter: Optional[List[str]]) -> Any:
+    """
+    Filter API response to return only specified fields as array of arrays (rows).
 
     Args:
         data: API response data to filter
-        fields_filter: JSONPath expression to extract specific fields (None = return all)
+        fields_filter: List of dot-separated field paths to extract
+                      - None (not passed): return all data unchanged
+                      - [] (empty array): return empty array
+                      - ["field1", "field2"]: return filtered fields as array of arrays
 
     Returns:
-        Filtered data or original data if filter is None or invalid
+        - Original data if fields_filter is None
+        - Empty array if fields_filter is []
+        - Array of arrays where each inner array contains values for requested attributes (one row per record)
 
     Examples:
-        $.items[*].Invoice.id - Extract only invoice IDs from items
-        $.items[*].Client.name - Extract only client names
-        $..email - All email fields recursively
+        None -> {original response data}
+        [] -> []
+        ["items.Invoice.id", "items.Invoice.name"] -> [[1, "Invoice A"], [2, "Invoice B"], ...]
+        ["Invoice.id", "Invoice.name"] -> [[123, "My Invoice"]]
+        ["itemCount"] -> [[42]]
     """
     if fields_filter is None:
         return data
 
-    try:
-        jsonpath_expr = parse(fields_filter)
-        matches = [match.value for match in jsonpath_expr.find(data)]
+    if not fields_filter:  # empty list
+        return []
 
-        # If we got matches, return them in a structured way
-        if matches:
-            return {"filtered_results": matches, "filter_applied": fields_filter}
-        else:
-            return {
-                "filtered_results": [],
-                "filter_applied": fields_filter,
-                "message": "No matches found for the given JSONPath expression"
-            }
-    except Exception as e:
-        # If JSONPath parsing fails, return original data with error
-        return {
-            "error": f"Invalid JSONPath expression: {str(e)}",
-            "filter_applied": fields_filter,
-            "original_data": data
-        }
+    # Extract all values for each field path
+    extracted_values = []
+    for field_path in fields_filter:
+        value = _get_nested_value(data, field_path)
+        extracted_values.append(value)
+
+    # Check if all values are lists (meaning we're extracting from array data)
+    all_lists = all(isinstance(v, list) for v in extracted_values if v is not None)
+
+    if all_lists and extracted_values:
+        # Get all non-None list values
+        list_values = [v for v in extracted_values if v is not None and isinstance(v, list)]
+
+        if not list_values:
+            return []
+
+        # Find the maximum length (in case lists have different lengths)
+        max_len = max(len(v) for v in list_values)
+
+        # Zip values together into rows
+        # Use None for missing values if lists have different lengths
+        rows = []
+        for i in range(max_len):
+            row = []
+            for value in extracted_values:
+                if value is None:
+                    row.append(None)
+                elif isinstance(value, list):
+                    row.append(value[i] if i < len(value) else None)
+                else:
+                    # Scalar value - repeat for each row
+                    row.append(value)
+            rows.append(row)
+
+        return rows
+    else:
+        # All scalar values or mixed - return as single row
+        row = [v for v in extracted_values]
+        return [row]
 
 
 # Global client for single-tenant deployments using environment variables
@@ -516,9 +588,9 @@ def list_invoices(
     search: Optional[str] = None,
     tag: Optional[int] = None,
     ignore: Optional[str] = None,
-    fields_filter: Optional[str] = None,
+    fields_filter: Optional[List[str]] = None,
 context: Context = None,
-) -> Dict[str, Any]:
+) -> Any:
     """
     List invoices with comprehensive filtering and sorting.
 
@@ -549,11 +621,19 @@ context: Context = None,
         search: Base64 encoded search string
         tag: Filter by tag ID
         ignore: Invoice IDs to exclude. Use | for multiple (e.g., '1|2|3')
-        fields_filter: JSONPath expression to filter returned fields (None = return all fields)
-                      Examples: '$.items[*].Invoice.id' for IDs only, '$..name' for all names
+        fields_filter: List of field paths to extract as array of arrays (rows)
+                      - None (default): return all fields unchanged
+                      - []: return empty array
+                      - ["field1", "field2"]: return only specified fields as array of arrays
+                      Examples:
+                        - None -> {full response with all fields}
+                        - [] -> []
+                        - ["items.Invoice.id", "items.Invoice.name"] -> [[1, "Invoice A"], [2, "Invoice B"], ...]
+                        - ["items.Invoice.total", "items.Client.name"] -> [[100.50, "Company A"], [250.00, "Company B"], ...]
+                        - ["itemCount", "pageCount"] -> [[42, 3]]
 
     Returns:
-        List of invoices with pagination info and metadata (or filtered results if fields_filter provided)
+        List of invoices with pagination info and metadata (if fields_filter is None), or array of arrays if fields_filter is specified
     """
     # Validate per_page max
     if per_page > 200:
@@ -629,28 +709,36 @@ context: Context = None,
 
     endpoint = f"invoices/index.json/{'/'.join(params)}"
     response = _get_client(context).get(endpoint)
-    return _apply_jsonpath_filter(response, fields_filter)
+    return _apply_fields_filter(response, fields_filter)
 
 
 @mcp.tool()
 def get_invoice(
     invoice_id: int,
-    fields_filter: Optional[str] = None,
+    fields_filter: Optional[List[str]] = None,
     context: Context = None,
-) -> Dict[str, Any]:
+) -> Any:
     """
     Get detailed information about a specific invoice.
 
     Args:
         invoice_id: ID of the invoice to retrieve
-        fields_filter: JSONPath expression to filter returned fields (None = return all fields)
-                      Examples: '$.Invoice.id' for ID only, '$.Invoice.name' for name only
+        fields_filter: List of field paths to extract as array of arrays (rows)
+                      - None (default): return all fields unchanged
+                      - []: return empty array
+                      - ["field1", "field2"]: return only specified fields as array of arrays
+                      Examples:
+                        - None -> {full invoice response with all fields}
+                        - [] -> []
+                        - ["Invoice.id", "Invoice.name"] -> [[123, "My Invoice"]]
+                        - ["Invoice.total", "Client.name"] -> [[500.00, "ACME Corp"]]
+                        - ["InvoiceItem.name", "InvoiceItem.unit_price"] -> [["Item A", 10.00], ["Item B", 20.00], ...]
 
     Returns:
-        Invoice details including items, client info, and payment status (or filtered results if fields_filter provided)
+        Invoice details including items, client info, and payment status (if fields_filter is None), or array of arrays if fields_filter is specified
     """
     response = _get_client(context).get(f"invoices/view/{invoice_id}.json")
-    return _apply_jsonpath_filter(response, fields_filter)
+    return _apply_fields_filter(response, fields_filter)
 
 
 @mcp.tool()
@@ -870,9 +958,9 @@ def list_clients(
     created_to: Optional[str] = None,
     modified_since: Optional[str] = None,
     modified_to: Optional[str] = None,
-    fields_filter: Optional[str] = None,
+    fields_filter: Optional[List[str]] = None,
 context: Context = None,
-) -> Dict[str, Any]:
+) -> Any:
     """
     List all clients with comprehensive filtering and sorting.
 
@@ -890,11 +978,19 @@ context: Context = None,
         created_to: Creation date to (YYYY-MM-DD, requires created:3)
         modified_since: Last modification date from (YYYY-MM-DD, requires modified:3)
         modified_to: Last modification date to (YYYY-MM-DD, requires modified:3)
-        fields_filter: JSONPath expression to filter returned fields (None = return all fields)
-                      Examples: '$.items[*].Client.name' for names only, '$.items[*].Client.email' for emails
+        fields_filter: List of field paths to extract as array of arrays (rows)
+                      - None (default): return all fields unchanged
+                      - []: return empty array
+                      - ["field1", "field2"]: return only specified fields as array of arrays
+                      Examples:
+                        - None -> {full response with all fields}
+                        - [] -> []
+                        - ["items.Client.name", "items.Client.email"] -> [["ACME Corp", "info@acme.com"], ["Company B", "b@example.com"], ...]
+                        - ["items.Client.ico", "items.Client.dic"] -> [["12345678", "CZ12345678"], ...]
+                        - ["itemCount", "pageCount"] -> [[15, 1]]
 
     Returns:
-        List of clients with pagination info and metadata (or filtered results if fields_filter provided)
+        List of clients with pagination info and metadata (if fields_filter is None), or array of arrays if fields_filter is specified
     """
     params = [
         f"page:{page}",
@@ -930,28 +1026,35 @@ context: Context = None,
 
     endpoint = f"clients/index.json/{'/'.join(params)}"
     response = _get_client(context).get(endpoint)
-    return _apply_jsonpath_filter(response, fields_filter)
+    return _apply_fields_filter(response, fields_filter)
 
 
 @mcp.tool()
 def get_client(
     client_id: int,
-    fields_filter: Optional[str] = None,
+    fields_filter: Optional[List[str]] = None,
     context: Context = None,
-) -> Dict[str, Any]:
+) -> Any:
     """
     Get detailed information about a specific client.
 
     Args:
         client_id: ID of the client to retrieve
-        fields_filter: JSONPath expression to filter returned fields (None = return all fields)
-                      Examples: '$.Client.name' for name only, '$.Client.email' for email only
+        fields_filter: List of field paths to extract as array of arrays (rows)
+                      - None (default): return all fields unchanged
+                      - []: return empty array
+                      - ["field1", "field2"]: return only specified fields as array of arrays
+                      Examples:
+                        - None -> {full client response with all fields}
+                        - [] -> []
+                        - ["Client.name", "Client.email"] -> [["ACME Corp", "info@acme.com"]]
+                        - ["Client.ico", "Client.dic", "Client.city"] -> [["12345678", "CZ12345678", "Prague"]]
 
     Returns:
-        Client details including contact information and invoice history (or filtered results if fields_filter provided)
+        Client details including contact information and invoice history (if fields_filter is None), or array of arrays if fields_filter is specified
     """
     response = _get_client(context).get(f"clients/view/{client_id}.json")
-    return _apply_jsonpath_filter(response, fields_filter)
+    return _apply_fields_filter(response, fields_filter)
 
 
 @mcp.tool()
@@ -1132,9 +1235,9 @@ def list_expenses(
     search: Optional[str] = None,
     status: Optional[str] = None,
     type: Optional[str] = None,
-    fields_filter: Optional[str] = None,
+    fields_filter: Optional[List[str]] = None,
 context: Context = None,
-) -> Dict[str, Any]:
+) -> Any:
     """
     List expenses with comprehensive filtering and sorting.
 
@@ -1159,11 +1262,19 @@ context: Context = None,
         search: Base64 encoded search string
         status: Expense status filter. Use | for multiple (e.g., '1|2')
         type: Expense type filter
-        fields_filter: JSONPath expression to filter returned fields (None = return all fields)
-                      Examples: '$.items[*].Expense.name' for names only, '$.items[*].Expense.amount' for amounts
+        fields_filter: List of field paths to extract as array of arrays (rows)
+                      - None (default): return all fields unchanged
+                      - []: return empty array
+                      - ["field1", "field2"]: return only specified fields as array of arrays
+                      Examples:
+                        - None -> {full response with all fields}
+                        - [] -> []
+                        - ["items.Expense.name", "items.Expense.amount"] -> [["Office supplies", 150.00], ["Software license", 99.00], ...]
+                        - ["items.Expense.expense_date", "items.Client.name"] -> [["2025-01-15", "Supplier A"], ...]
+                        - ["itemCount", "pageCount"] -> [[8, 1]]
 
     Returns:
-        List of expenses with pagination info and metadata (or filtered results if fields_filter provided)
+        List of expenses with pagination info and metadata (if fields_filter is None), or array of arrays if fields_filter is specified
     """
     # Validate per_page max
     if per_page > 100:
@@ -1221,28 +1332,36 @@ context: Context = None,
 
     endpoint = f"expenses/index.json/{'/'.join(params)}"
     response = _get_client(context).get(endpoint)
-    return _apply_jsonpath_filter(response, fields_filter)
+    return _apply_fields_filter(response, fields_filter)
 
 
 @mcp.tool()
 def get_expense(
     expense_id: int,
-    fields_filter: Optional[str] = None,
+    fields_filter: Optional[List[str]] = None,
     context: Context = None,
-) -> Dict[str, Any]:
+) -> Any:
     """
     Get detailed information about a specific expense.
 
     Args:
         expense_id: ID of the expense to retrieve
-        fields_filter: JSONPath expression to filter returned fields (None = return all fields)
-                      Examples: '$.Expense.name' for name only, '$.Expense.amount' for amount only
+        fields_filter: List of field paths to extract as array of arrays (rows)
+                      - None (default): return all fields unchanged
+                      - []: return empty array
+                      - ["field1", "field2"]: return only specified fields as array of arrays
+                      Examples:
+                        - None -> {full expense response with all fields}
+                        - [] -> []
+                        - ["Expense.name", "Expense.amount"] -> [["Office supplies", 150.00]]
+                        - ["ExpenseItem.name", "ExpenseItem.unit_price"] -> [["Paper", 10.00], ["Pens", 5.00], ...]
+                        - ["Expense.expense_date", "Client.name"] -> [["2025-01-15", "Supplier A"]]
 
     Returns:
-        Expense details (or filtered results if fields_filter provided)
+        Expense details (if fields_filter is None), or array of arrays if fields_filter is specified
     """
     response = _get_client(context).get(f"expenses/view/{expense_id}.json")
-    return _apply_jsonpath_filter(response, fields_filter)
+    return _apply_fields_filter(response, fields_filter)
 
 
 # ============================================================================
