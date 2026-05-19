@@ -643,18 +643,10 @@ context: Context = None,
         f"page:{page}",
         f"per_page:{per_page}",
         f"listinfo:{listinfo}",
-        f"direction:{direction}",
-        f"sort:{sort}",
     ]
 
-    if type:
-        params.append(f"type:{type}")
-    if status:
-        params.append(f"status:{status}")
-    if client_id:
-        params.append(f"client_id:{client_id}")
-
-    # Time-based filters
+    # Time-based filters - add BEFORE sort to avoid URL parsing conflicts
+    # when sort field name matches a filter field name (e.g., sort:delivery vs delivery:3)
     if created_since or created_to:
         params.append("created:3")
         if created_since:
@@ -682,6 +674,17 @@ context: Context = None,
             params.append(f"paydate_since:{paydate_since}")
         if paydate_to:
             params.append(f"paydate_to:{paydate_to}")
+
+    # Add sort after date filters to avoid conflicts
+    params.append(f"direction:{direction}")
+    params.append(f"sort:{sort}")
+
+    if type:
+        params.append(f"type:{type}")
+    if status:
+        params.append(f"status:{status}")
+    if client_id:
+        params.append(f"client_id:{client_id}")
 
     # Amount filters
     if amount_from is not None:
@@ -996,20 +999,10 @@ context: Context = None,
         f"page:{page}",
         f"per_page:{per_page}",
         f"listinfo:{listinfo}",
-        f"direction:{direction}",
-        f"sort:{sort}",
     ]
 
-    if char_filter:
-        params.append(f"char_filter:{char_filter}")
-    if search:
-        params.append(f"search:{search}")
-    if search_uuid:
-        params.append(f"search_uuid:{search_uuid}")
-    if tag:
-        params.append(f"tag:{tag}")
-
-    # Time-based filters
+    # Time-based filters - add BEFORE sort to avoid URL parsing conflicts
+    # when sort field name matches a filter field name (e.g., sort:created vs created:3)
     if created_since or created_to:
         params.append("created:3")
         if created_since:
@@ -1023,6 +1016,19 @@ context: Context = None,
             params.append(f"modified_since:{modified_since}")
         if modified_to:
             params.append(f"modified_to:{modified_to}")
+
+    # Add sort after date filters to avoid conflicts
+    params.append(f"direction:{direction}")
+    params.append(f"sort:{sort}")
+
+    if char_filter:
+        params.append(f"char_filter:{char_filter}")
+    if search:
+        params.append(f"search:{search}")
+    if search_uuid:
+        params.append(f"search_uuid:{search_uuid}")
+    if tag:
+        params.append(f"tag:{tag}")
 
     endpoint = f"clients/index.json/{'/'.join(params)}"
     response = _get_client(context).get(endpoint)
@@ -1284,20 +1290,10 @@ context: Context = None,
         f"page:{page}",
         f"per_page:{per_page}",
         f"listinfo:{listinfo}",
-        f"direction:{direction}",
-        f"sort:{sort}",
     ]
 
-    if amount_from is not None:
-        params.append(f"amount_from:{amount_from}")
-    if amount_to is not None:
-        params.append(f"amount_to:{amount_to}")
-    if category:
-        params.append(f"category:{category}")
-    if client_id:
-        params.append(f"client_id:{client_id}")
-
-    # Time-based filters
+    # Time-based filters - add BEFORE sort to avoid URL parsing conflicts
+    # when sort field name matches a filter field name (e.g., sort:delivery vs delivery:3)
     if created_since or created_to:
         params.append("created:3")
         if created_since:
@@ -1318,6 +1314,19 @@ context: Context = None,
             params.append(f"delivery_since:{delivery_since}")
         if delivery_to:
             params.append(f"delivery_to:{delivery_to}")
+
+    # Add sort after date filters to avoid conflicts
+    params.append(f"direction:{direction}")
+    params.append(f"sort:{sort}")
+
+    if amount_from is not None:
+        params.append(f"amount_from:{amount_from}")
+    if amount_to is not None:
+        params.append(f"amount_to:{amount_to}")
+    if category:
+        params.append(f"category:{category}")
+    if client_id:
+        params.append(f"client_id:{client_id}")
 
     if due:
         params.append(f"due:{due}")
