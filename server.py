@@ -1528,7 +1528,7 @@ if __name__ == "__main__":
         # HTTP mode for Smithery hosted deployment
         # Users connect with credentials in URL query params
         import uvicorn
-        app = mcp.get_asgi_app()
+        app = mcp.http_app()
         port = int(os.getenv("PORT", 8000))
         print(f"Starting HTTP server on port {port}")
         uvicorn.run(app, host="0.0.0.0", port=port)
